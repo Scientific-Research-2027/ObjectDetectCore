@@ -26,7 +26,7 @@ python tools/prepare_ncnn.py 'D:\ObjectDetectCore\...\models\yolo26n_ncnn_model'
 
 Đường dẫn `D:\ObjectDetectCore\...` **chỉ là ví dụ**: thay bằng file `.pt` thực tế và thư mục NCNN xuất ra mà script thông báo. `tools/export_yolo26.py` lưu version + export args trong `detectcore-export.json`. `tools/prepare_ncnn.py` đọc `metadata.yaml` và `.param`, lấy tên tensor từ graph **thực**, viết `classes.txt`, `detectcore.cfg`. Không truyền trực tiếp `.pt` vào ứng dụng C++.
 
-## 3. Configure / build / test Windows
+## 3. Configure / build / test
 
 - Cấu hình CMake
 ```powershell
