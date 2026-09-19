@@ -1,0 +1,10 @@
+build*/
+build-win/
+.vs/
+__pycache__/
+*.pyc
+*.user
+*.suo
+models/*_ncnn_model/
+# models/*.pt
+*.exe
