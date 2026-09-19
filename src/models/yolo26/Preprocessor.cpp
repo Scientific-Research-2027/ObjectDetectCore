@@ -15,6 +15,8 @@ LetterboxResult preprocess(const cv::Mat& src, int w, int h) {
     int rh=std::max(1, std::min(h, static_cast<int>(std::round(src.rows*result.scale))));
     cv::Mat resized, padded(h,w,CV_8UC3,cv::Scalar(114,114,114));
     cv::resize(src,resized,{rw,rh},0,0,cv::INTER_LINEAR);
+    result.scaleX=static_cast<float>(rw)/src.cols;
+    result.scaleY=static_cast<float>(rh)/src.rows;
     result.padLeft=(w-rw)/2; result.padTop=(h-rh)/2;
     resized.copyTo(padded(cv::Rect(result.padLeft,result.padTop,rw,rh)));
     cv::cvtColor(padded,result.rgb,cv::COLOR_BGR2RGB);
