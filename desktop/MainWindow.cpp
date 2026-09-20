@@ -19,10 +19,10 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPolygon>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
-#include <QStyle>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -91,6 +91,62 @@ QIcon toolbarIcon(bool camera, bool refresh) {
     }
     p.end();
     return QIcon(pixels);
+}
+
+// Paint the video icons ourselves: platform standard icons can have dark
+// foregrounds on Windows even when QSS specifies white text. Qt owns the
+// resulting, implicitly shared icon pixels; no images are allocated per frame.
+enum class VideoGlyph { ToStart, Play, Pause, ToEnd };
+
+QPixmap paintVideoGlyph(VideoGlyph glyph, const QColor& ink) {
+    QPixmap pixels(48, 48);
+    pixels.fill(Qt::transparent);
+    pixels.setDevicePixelRatio(2.0);
+    QPainter painter(&pixels);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(ink);
+
+    switch (glyph) {
+    case VideoGlyph::ToStart:
+        painter.drawRoundedRect(QRectF(4.5, 5, 2.5, 14), 0.7, 0.7);
+        painter.drawPolygon(QPolygonF{{19, 5}, {8.5, 12}, {19, 19}});
+        break;
+    case VideoGlyph::Play:
+        painter.drawPolygon(QPolygonF{{7, 4.5}, {19, 12}, {7, 19.5}});
+        break;
+    case VideoGlyph::Pause:
+        painter.drawRoundedRect(QRectF(6.5, 5, 4.5, 14), 0.9, 0.9);
+        painter.drawRoundedRect(QRectF(13, 5, 4.5, 14), 0.9, 0.9);
+        break;
+    case VideoGlyph::ToEnd:
+        painter.drawPolygon(QPolygonF{{5, 5}, {15.5, 12}, {5, 19}});
+        painter.drawRoundedRect(QRectF(17, 5, 2.5, 14), 0.7, 0.7);
+        break;
+    }
+    return pixels;
+}
+
+QIcon videoGlyphIcon(VideoGlyph glyph) {
+    QIcon icon;
+    icon.addPixmap(paintVideoGlyph(glyph, QColor("#ffffff")), QIcon::Normal);
+    icon.addPixmap(paintVideoGlyph(glyph, QColor("#8998a8")), QIcon::Disabled);
+    return icon;
+}
+
+const QIcon& cachedVideoGlyphIcon(VideoGlyph glyph) {
+    // Bounded, immutable Qt icons: state updates never rebuild pixmaps.
+    static const QIcon startIcon = videoGlyphIcon(VideoGlyph::ToStart);
+    static const QIcon playIcon = videoGlyphIcon(VideoGlyph::Play);
+    static const QIcon pauseIcon = videoGlyphIcon(VideoGlyph::Pause);
+    static const QIcon endIcon = videoGlyphIcon(VideoGlyph::ToEnd);
+    switch (glyph) {
+    case VideoGlyph::ToStart: return startIcon;
+    case VideoGlyph::Play:    return playIcon;
+    case VideoGlyph::Pause:   return pauseIcon;
+    case VideoGlyph::ToEnd:  return endIcon;
+    }
+    return playIcon; // Keep compilers happy if a new enum value is introduced.
 }
 
 // The Windows/Qt native spin arrows can have a tiny (or incorrectly styled)
@@ -246,6 +302,12 @@ MainWindow::MainWindow() {
         QToolButton#videoControl:hover { background: #3e5b71; }
         QToolButton#videoControl:pressed { background: #236bbb; }
         QToolButton#videoControl:disabled { color: #83909b; background: #253441; }
+        QToolButton#videoPlayPause { color: #ffffff; background: #d92945;
+                    border: 1px solid #f04b64; border-radius: 6px; padding: 2px; }
+        QToolButton#videoPlayPause:hover { background: #ed3b55; }
+        QToolButton#videoPlayPause:pressed { background: #ac1d35; }
+        QToolButton#videoPlayPause:disabled { background: #733847;
+                    border-color: #84505c; }
         QSlider::groove:horizontal { background: #627989; height: 5px; border-radius: 2px; }
         QSlider::sub-page:horizontal { background: #ff923e; border-radius: 2px; }
         QSlider::handle:horizontal { background: #ff923e; border: 2px solid #f2c197;
@@ -364,10 +426,10 @@ MainWindow::MainWindow() {
     auto* videoButtons = new QHBoxLayout;
     videoButtons->setSpacing(9);
     videoButtons->addStretch();
-    auto videoButton = [&](QStyle::StandardPixmap icon, const QString& tip) {
+    auto videoButton = [&](const QIcon& icon, const QString& tip) {
         auto* button = new QToolButton(videoBar_);
         button->setObjectName("videoControl");
-        button->setIcon(style()->standardIcon(icon));
+        button->setIcon(icon);
         button->setIconSize(QSize(20, 20));
         button->setFixedSize(36, 32);
         button->setToolTip(tip);
@@ -375,17 +437,18 @@ MainWindow::MainWindow() {
         videoButtons->addWidget(button);
         return button;
     };
-    videoStartButton_ = videoButton(QStyle::SP_MediaSkipBackward, "Go to start");
-    skipBackButton_ = videoButton(QStyle::SP_MediaSeekBackward, "Back 10 seconds");
+    videoStartButton_ = videoButton(cachedVideoGlyphIcon(VideoGlyph::ToStart), "Go to start");
+    skipBackButton_ = videoButton({}, "Back 10 seconds");
     skipBackButton_->setText("-10s");
     skipBackButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    playPauseButton_ = videoButton(QStyle::SP_MediaPause, "Pause video");
+    playPauseButton_ = videoButton(cachedVideoGlyphIcon(VideoGlyph::Pause), "Pause video");
+    playPauseButton_->setObjectName("videoPlayPause");
     playPauseButton_->setIconSize(QSize(26, 26));
-    skipForwardButton_ = videoButton(QStyle::SP_MediaSeekForward, "Forward 30 seconds");
+    playPauseButton_->setFixedSize(42, 36);
+    skipForwardButton_ = videoButton({}, "Forward 30 seconds");
     skipForwardButton_->setText("+30s");
     skipForwardButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    videoEndButton_ = videoButton(QStyle::SP_MediaSkipForward, "Go to end");
-    videoStopButton_ = videoButton(QStyle::SP_MediaStop, "Stop video");
+    videoEndButton_ = videoButton(cachedVideoGlyphIcon(VideoGlyph::ToEnd), "Go to end");
     videoButtons->addStretch();
     videoLayout->addLayout(videoButtons);
     root->addWidget(videoBar_);
@@ -398,7 +461,6 @@ MainWindow::MainWindow() {
             start(FrameWorker::Source::Video, lastPath_); // Replay after EOF/Stop.
         }
     });
-    connect(videoStopButton_, &QToolButton::clicked, this, [this] { stop(); });
     connect(videoStartButton_, &QToolButton::clicked, this, [this] { seekVideo(0); });
     connect(videoEndButton_, &QToolButton::clicked, this, [this] {
         if (videoDurationMs_ > 0) seekVideo(videoDurationMs_ - 1);
@@ -823,10 +885,9 @@ void MainWindow::updateVideoControls() {
     videoSlider_->setEnabled(seek);
     for (auto* button : {videoStartButton_, videoEndButton_, skipBackButton_, skipForwardButton_})
         button->setEnabled(seek);
-    videoStopButton_->setEnabled(active);
     playPauseButton_->setEnabled(active || (video && !thread_));
     const bool paused = !active || videoPlayback_->isPaused();
-    playPauseButton_->setIcon(style()->standardIcon(paused ? QStyle::SP_MediaPlay : QStyle::SP_MediaPause));
+    playPauseButton_->setIcon(cachedVideoGlyphIcon(paused ? VideoGlyph::Play : VideoGlyph::Pause));
     playPauseButton_->setToolTip(paused ? "Play video" : "Pause video");
     playPauseButton_->setAccessibleName(playPauseButton_->toolTip());
 }

@@ -66,7 +66,7 @@ private:
     QComboBox* cameraCombo_ = nullptr;
     QPushButton* cameraButton_ = nullptr;
     QWidget* videoBar_ = nullptr;
-    QToolButton *playPauseButton_ = nullptr, *videoStopButton_ = nullptr;
+    QToolButton* playPauseButton_ = nullptr;
     QToolButton *skipBackButton_ = nullptr, *skipForwardButton_ = nullptr;
     QToolButton *videoStartButton_ = nullptr, *videoEndButton_ = nullptr;
     QSlider* videoSlider_ = nullptr;
