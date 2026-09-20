@@ -18,6 +18,8 @@ class QLabel;
 class QLineEdit;
 class QPaintEvent;
 class QPushButton;
+class QSlider;
+class QToolButton;
 class QSpinBox;
 
 class ImageView final : public QWidget {
@@ -48,6 +50,10 @@ private:
     void clearPresentation();
     void updateCameraButton();
     void refreshWindow();
+    void setVideoPaused(bool paused);
+    void seekVideo(qint64 positionMs);
+    void updateVideoControls();
+    void displayVideoPosition(qint64 positionMs);
     void filterClasses(const QString& query);
     void setAllClassesChecked(bool enabled);
     void updateSelectedClassCount();
@@ -59,6 +65,12 @@ private:
     QLabel* modelLabel_ = nullptr;
     QComboBox* cameraCombo_ = nullptr;
     QPushButton* cameraButton_ = nullptr;
+    QWidget* videoBar_ = nullptr;
+    QToolButton *playPauseButton_ = nullptr, *videoStopButton_ = nullptr;
+    QToolButton *skipBackButton_ = nullptr, *skipForwardButton_ = nullptr;
+    QToolButton *videoStartButton_ = nullptr, *videoEndButton_ = nullptr;
+    QSlider* videoSlider_ = nullptr;
+    QLabel *videoTimeLabel_ = nullptr, *videoDurationLabel_ = nullptr;
     QDoubleSpinBox *conf_ = nullptr, *iou_ = nullptr;
     QSpinBox *maxDetections_ = nullptr, *threads_ = nullptr;
     QWidget* classContent_ = nullptr;
@@ -75,6 +87,9 @@ private:
     QPointer<QThread> thread_;
     std::shared_ptr<LiveSettings> settings_ = std::make_shared<LiveSettings>();
     std::shared_ptr<std::atomic_bool> stopFlag_, pending_;
+    std::shared_ptr<VideoPlayback> videoPlayback_;
+    qint64 videoDurationMs_ = 0, videoPositionMs_ = 0;
+    bool videoSeekable_ = false;
     int generation_ = 0;
     bool closing_ = false;
     bool restart_ = false;

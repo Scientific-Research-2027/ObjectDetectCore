@@ -116,14 +116,14 @@ void FrameWorker::run() {
         std::string labelScratch;
         labelScratch.reserve(128);
         const auto process = [&](const cv::Mat& frame, double fps) {
-            if (stop_->load()) return;
+            if (stop_->load()) return false;
             const auto begin = Clock::now();
             const detectcore::Options options{req_.settings->confidence.load(),
                                                req_.settings->iou.load(), req_.threads};
             auto result = core.detect(frame, options);
-            if (stop_->load()) return;
+            if (stop_->load()) return false;
             // Only one owned image may wait on the GUI event queue at a time.
-            if (pending_->exchange(true)) { ++dropped; return; }
+            if (pending_->exchange(true)) { ++dropped; return false; }
             selected.clear();
             selected.reserve(result.detections.size());
             {
@@ -139,12 +139,13 @@ void FrameWorker::run() {
                 selected.resize(limit);
             }
             auto image = drawDetections(frame, selected, previewScratch, labelScratch);
-            if (stop_->load()) { pending_->store(false); return; }
+            if (stop_->load()) { pending_->store(false); return false; }
             const double total = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
             FrameMetrics metrics{result.timing.preprocessMs, result.timing.inferenceMs,
                                  result.timing.postprocessMs, total, fps, dropped,
                                  static_cast<int>(selected.size())};
             emit frameReady(std::move(image), metrics, req_.generation);
+            return true;
         };
 
         if (req_.source == Source::Image) {
@@ -175,18 +176,86 @@ void FrameWorker::run() {
             cv::Mat frame;
             int failures = 0;
             auto last = Clock::now();
-            while (!stop_->load()) {
-                if (!cap.read(frame) || frame.empty()) {
-                    if (req_.source == Source::Video) break;
-                    if (++failures >= 10) throw std::runtime_error("Camera ngắt kết nối hoặc không có frame");
-                    QThread::msleep(30);
-                    continue;
+            if (req_.source == Source::Video) {
+                // Video has a presentation clock, unlike the live camera. Avoid
+                // racing through the file at the maximum decoder/inference rate.
+                const double rawFps = cap.get(cv::CAP_PROP_FPS);
+                const bool fpsValid = std::isfinite(rawFps) && rawFps > 0.1 && rawFps <= 240.0;
+                const double fps = fpsValid ? rawFps : 30.0;
+                const double rawCount = cap.get(cv::CAP_PROP_FRAME_COUNT);
+                const bool countValid = std::isfinite(rawCount) && rawCount >= 1.0 &&
+                                        rawCount <= 1.0e10;
+                const bool seekable = fpsValid && countValid;
+                const std::int64_t durationMs = seekable
+                    ? static_cast<std::int64_t>(std::ceil(rawCount * 1000.0 / fps)) : 0;
+                emit videoOpened(durationMs, seekable, req_.generation);
+                if (!req_.playback) throw std::logic_error("Missing video playback controller");
+                if (req_.initialVideoPositionMs > 0 && seekable)
+                    req_.playback->seek(std::min(req_.initialVideoPositionMs, durationMs));
+
+                const auto framePeriod = std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(1.0 / fps));
+                auto nextFrame = Clock::now();
+                std::int64_t shownMs = 0;
+                while (!stop_->load()) {
+                    const auto cmd = req_.playback->next(*stop_, nextFrame);
+                    if (cmd.stop) break;
+                    if (cmd.seek && seekable) {
+                        // Only this worker touches VideoCapture. CAP_PROP_POS_FRAMES
+                        // is more consistent than POS_MSEC across OpenCV backends.
+                        const auto frameNumber = std::clamp(
+                            std::floor(static_cast<long double>(cmd.seekMs) * fps / 1000.0L),
+                            0.0L, static_cast<long double>(rawCount - 1.0));
+                        if (!cap.set(cv::CAP_PROP_POS_FRAMES, static_cast<double>(frameNumber))) {
+                            emit playbackNotice("Video backend does not support seeking", req_.generation);
+                            emit videoOpened(durationMs, false, req_.generation);
+                        } else {
+                            shownMs = static_cast<std::int64_t>(frameNumber * 1000.0L / fps);
+                        }
+                    }
+                    // A paused seek must not be discarded merely because a
+                    // previous frame is still awaiting GUI consumption.
+                    if (cmd.seek) {
+                        while (pending_->load() && !stop_->load()) QThread::msleep(5);
+                    }
+                    if (stop_->load()) break;
+                    if (!cap.read(frame) || frame.empty()) {
+                        if (stop_->load()) break;
+                        // Natural end-of-file: keep the last frame visible and
+                        // release the decoder/model; replay starts a fresh worker.
+                        emit videoPosition(durationMs > 0 ? durationMs : shownMs, req_.generation);
+                        break;
+                    }
+                    const double actualFrame = cap.get(cv::CAP_PROP_POS_FRAMES);
+                    if (fpsValid && std::isfinite(actualFrame) && actualFrame >= 1.0) {
+                        shownMs = static_cast<std::int64_t>((actualFrame - 1.0) * 1000.0 / fps);
+                    } else if (!cmd.seek) {
+                        shownMs += static_cast<std::int64_t>(std::llround(1000.0 / fps));
+                    }
+                    if (durationMs > 0) shownMs = std::clamp<std::int64_t>(shownMs, 0, durationMs);
+                    const auto now = Clock::now();
+                    const double seconds = std::chrono::duration<double>(now - last).count();
+                    last = now;
+                    if (process(frame, seconds > 0.0 ? 1.0 / seconds : 0.0))
+                        emit videoPosition(shownMs, req_.generation);
+                    // Pacing from completion (not the start) bounds CPU usage;
+                    // slow inference naturally reduces the achievable playback rate.
+                    nextFrame = Clock::now() + framePeriod;
                 }
-                failures = 0;
-                const auto now = Clock::now();
-                const double seconds = std::chrono::duration<double>(now - last).count();
-                last = now;
-                process(frame, seconds > 0.0 ? 1.0 / seconds : 0.0);
+            } else {
+                while (!stop_->load()) {
+                    if (!cap.read(frame) || frame.empty()) {
+                        if (++failures >= 10)
+                            throw std::runtime_error("Camera ngắt kết nối hoặc không có frame");
+                        QThread::msleep(30);
+                        continue;
+                    }
+                    failures = 0;
+                    const auto now = Clock::now();
+                    const double seconds = std::chrono::duration<double>(now - last).count();
+                    last = now;
+                    process(frame, seconds > 0.0 ? 1.0 / seconds : 0.0);
+                }
             }
             cap.release(); // Also released automatically on exceptions (RAII).
         }

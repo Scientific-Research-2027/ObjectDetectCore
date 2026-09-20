@@ -21,6 +21,8 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSlider>
+#include <QStyle>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -159,6 +161,16 @@ QWidget* makeSteppingControl(QWidget* parent, QAbstractSpinBox* spin,
     return control;
 }
 
+QString formatVideoTime(qint64 ms) {
+    const qint64 seconds = std::max<qint64>(0, ms) / 1000;
+    const qint64 minutes = seconds / 60;
+    if (minutes >= 60)
+        return QString("%1:%2:%3").arg(minutes / 60, 2, 10, QLatin1Char('0'))
+            .arg(minutes % 60, 2, 10, QLatin1Char('0'))
+            .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+    return QString("%1:%2").arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+}
 }
 
 ImageView::ImageView(QWidget* parent) : QWidget(parent) {
@@ -228,6 +240,16 @@ MainWindow::MainWindow() {
         QScrollArea { background: #192633; border: 0; }
         QScrollArea > QWidget > QWidget { background: #192633; }
         QCheckBox { color: #dce8f5; spacing: 7px; padding: 3px; }
+        QWidget#videoBar { background: #223544; border-radius: 5px; }
+        QToolButton#videoControl { color: #eaf2fb; background: #2a4051;
+                    border: 1px solid #3b5265; border-radius: 5px; padding: 2px; }
+        QToolButton#videoControl:hover { background: #3e5b71; }
+        QToolButton#videoControl:pressed { background: #236bbb; }
+        QToolButton#videoControl:disabled { color: #83909b; background: #253441; }
+        QSlider::groove:horizontal { background: #627989; height: 5px; border-radius: 2px; }
+        QSlider::sub-page:horizontal { background: #ff923e; border-radius: 2px; }
+        QSlider::handle:horizontal { background: #ff923e; border: 2px solid #f2c197;
+                    width: 12px; height: 12px; margin: -6px 0; border-radius: 7px; }
         QStatusBar { background: #16232e; color: #eaf2fb; border-top: 1px solid #2a3c4e; }
         QStatusBar::item { border: 0; }
         QScrollBar:vertical { background: #1a2a38; width: 10px; }
@@ -317,6 +339,84 @@ MainWindow::MainWindow() {
     right->setSpacing(9);
     workspace->addWidget(panel);
     root->addLayout(workspace, 1);
+
+    // Embedded, Qt-owned playback bar. VideoCapture remains worker-thread-only;
+    // no separate QMediaPlayer decoder or duplicated video frame buffer.
+    videoBar_ = new QWidget(content);
+    videoBar_->setObjectName("videoBar");
+    auto* videoLayout = new QVBoxLayout(videoBar_);
+    videoLayout->setContentsMargins(10, 6, 10, 6);
+    videoLayout->setSpacing(4);
+    auto* timeline = new QHBoxLayout;
+    timeline->setSpacing(10);
+    videoTimeLabel_ = new QLabel("00:00", videoBar_);
+    videoDurationLabel_ = new QLabel("--:--", videoBar_);
+    videoSlider_ = new QSlider(Qt::Horizontal, videoBar_);
+    videoSlider_->setRange(0, 10000);
+    videoSlider_->setSingleStep(10);
+    videoSlider_->setPageStep(100);
+    videoSlider_->setAccessibleName("Video position");
+    videoSlider_->setToolTip("Drag to seek in the current video");
+    timeline->addWidget(videoTimeLabel_);
+    timeline->addWidget(videoSlider_, 1);
+    timeline->addWidget(videoDurationLabel_);
+    videoLayout->addLayout(timeline);
+    auto* videoButtons = new QHBoxLayout;
+    videoButtons->setSpacing(9);
+    videoButtons->addStretch();
+    auto videoButton = [&](QStyle::StandardPixmap icon, const QString& tip) {
+        auto* button = new QToolButton(videoBar_);
+        button->setObjectName("videoControl");
+        button->setIcon(style()->standardIcon(icon));
+        button->setIconSize(QSize(20, 20));
+        button->setFixedSize(36, 32);
+        button->setToolTip(tip);
+        button->setAccessibleName(tip);
+        videoButtons->addWidget(button);
+        return button;
+    };
+    videoStartButton_ = videoButton(QStyle::SP_MediaSkipBackward, "Go to start");
+    skipBackButton_ = videoButton(QStyle::SP_MediaSeekBackward, "Back 10 seconds");
+    skipBackButton_->setText("-10s");
+    skipBackButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    playPauseButton_ = videoButton(QStyle::SP_MediaPause, "Pause video");
+    playPauseButton_->setIconSize(QSize(26, 26));
+    skipForwardButton_ = videoButton(QStyle::SP_MediaSeekForward, "Forward 30 seconds");
+    skipForwardButton_->setText("+30s");
+    skipForwardButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    videoEndButton_ = videoButton(QStyle::SP_MediaSkipForward, "Go to end");
+    videoStopButton_ = videoButton(QStyle::SP_MediaStop, "Stop video");
+    videoButtons->addStretch();
+    videoLayout->addLayout(videoButtons);
+    root->addWidget(videoBar_);
+    videoBar_->hide();
+
+    connect(playPauseButton_, &QToolButton::clicked, this, [this] {
+        if (videoPlayback_ && thread_ && activeSource_ == FrameWorker::Source::Video) {
+            setVideoPaused(!videoPlayback_->isPaused());
+        } else if (hasSource_ && lastSource_ == FrameWorker::Source::Video && !thread_) {
+            start(FrameWorker::Source::Video, lastPath_); // Replay after EOF/Stop.
+        }
+    });
+    connect(videoStopButton_, &QToolButton::clicked, this, [this] { stop(); });
+    connect(videoStartButton_, &QToolButton::clicked, this, [this] { seekVideo(0); });
+    connect(videoEndButton_, &QToolButton::clicked, this, [this] {
+        if (videoDurationMs_ > 0) seekVideo(videoDurationMs_ - 1);
+    });
+    connect(skipBackButton_, &QToolButton::clicked, this, [this] {
+        seekVideo(std::max<qint64>(0, videoPositionMs_ - 10000));
+    });
+    connect(skipForwardButton_, &QToolButton::clicked, this, [this] {
+        seekVideo(std::min(videoDurationMs_ - 1, videoPositionMs_ + 30000));
+    });
+    connect(videoSlider_, &QSlider::sliderMoved, this, [this](int value) {
+        if (videoSeekable_)
+            videoTimeLabel_->setText(formatVideoTime(videoPositionFromSlider(value, videoDurationMs_)));
+    });
+    connect(videoSlider_, &QSlider::sliderReleased, this, [this] {
+        seekVideo(videoPositionFromSlider(videoSlider_->value(), videoDurationMs_));
+    });
+    updateVideoControls();
 
     auto* settingsBox = new QGroupBox("Detection settings", panel);
     auto* form = new QGridLayout(settingsBox);
@@ -435,6 +535,7 @@ MainWindow::MainWindow() {
 
 MainWindow::~MainWindow() {
     if (stopFlag_) stopFlag_->store(true);
+    if (videoPlayback_) videoPlayback_->wake();
     // Normally closeEvent defers destruction until QThread::finished.
     if (thread_) thread_->wait();
 }
@@ -443,6 +544,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     closing_ = true;
     restart_ = false;
     if (stopFlag_) stopFlag_->store(true);
+    if (videoPlayback_) videoPlayback_->wake();
     if (thread_) {
         event->ignore();
         statusBar()->showMessage("Closing capture and releasing model...");
@@ -520,6 +622,8 @@ void MainWindow::start(FrameWorker::Source source, const QString& path) {
     req.threads = threads_->value();
     req.generation = ++generation_;
     req.settings = settings_;
+    if (source == FrameWorker::Source::Video)
+        req.playback = std::make_shared<VideoPlayback>();
     if (source == FrameWorker::Source::Camera) {
         const QString wanted = cameraCombo_->currentData().toString();
         const auto found = std::find_if(cameraDevices_.cbegin(), cameraDevices_.cend(),
@@ -538,6 +642,8 @@ void MainWindow::start(FrameWorker::Source source, const QString& path) {
         next_ = std::move(req);
         restart_ = true;
         if (stopFlag_) stopFlag_->store(true);
+        if (videoPlayback_) videoPlayback_->wake();
+        updateVideoControls();
         statusBar()->showMessage("Switching source; closing the previous capture...");
         updateCameraButton();
         return;
@@ -548,6 +654,8 @@ void MainWindow::start(FrameWorker::Source source, const QString& path) {
 void MainWindow::stop() {
     restart_ = false;
     if (stopFlag_) stopFlag_->store(true);
+    if (videoPlayback_) videoPlayback_->wake();
+    updateVideoControls();
     statusBar()->showMessage("Stopping capture and releasing model...");
     updateCameraButton();
 }
@@ -568,7 +676,17 @@ void MainWindow::refreshWindow() {
         return;
     }
     statusBar()->showMessage("Refreshing detection and releasing the previous worker...");
-    start(lastSource_, lastPath_);
+    if (lastSource_ == FrameWorker::Source::Video && videoPlayback_) {
+        const qint64 position = videoPositionMs_;
+        const bool paused = videoPlayback_->isPaused();
+        start(lastSource_, lastPath_);
+        if (restart_) {
+            next_.initialVideoPositionMs = position;
+            next_.playback->setPaused(paused);
+        }
+    } else {
+        start(lastSource_, lastPath_);
+    }
 }
 
 void MainWindow::updateCameraButton() {
@@ -587,6 +705,17 @@ void MainWindow::launch(FrameWorker::Request req) {
         clearPresentation();
         showClasses({}, req.modelDirectory);
     }
+    if (req.source == FrameWorker::Source::Video) {
+        videoPlayback_ = req.playback;
+        videoDurationMs_ = 0;
+        videoPositionMs_ = req.initialVideoPositionMs;
+        videoSeekable_ = false;
+    } else {
+        videoPlayback_.reset();
+        videoDurationMs_ = videoPositionMs_ = 0;
+        videoSeekable_ = false;
+    }
+    updateVideoControls();
     stopFlag_ = std::make_shared<std::atomic_bool>(false);
     pending_ = std::make_shared<std::atomic_bool>(false);
     activeSource_ = req.source;
@@ -603,6 +732,23 @@ void MainWindow::launch(FrameWorker::Request req) {
                 viewer_->setImage(std::move(image));
                 showMetrics(metrics);
                 statusBar()->showMessage("Ready");
+            }, Qt::QueuedConnection);
+    connect(worker, &FrameWorker::videoOpened, this,
+            [this](qint64 duration, bool seekable, int generation) {
+                if (generation != generation_ || closing_) return;
+                videoDurationMs_ = duration;
+                videoSeekable_ = seekable;
+                videoDurationLabel_->setText(duration > 0 ? formatVideoTime(duration) : "--:--");
+                updateVideoControls();
+            }, Qt::QueuedConnection);
+    connect(worker, &FrameWorker::videoPosition, this,
+            [this](qint64 position, int generation) {
+                if (generation != generation_ || closing_) return;
+                displayVideoPosition(position);
+            }, Qt::QueuedConnection);
+    connect(worker, &FrameWorker::playbackNotice, this,
+            [this](const QString& message, int generation) {
+                if (generation == generation_ && !closing_) statusBar()->showMessage(message, 4000);
             }, Qt::QueuedConnection);
     connect(worker, &FrameWorker::classesReady, this,
             [this, modelDirectory](const QStringList& names, int generation) {
@@ -621,7 +767,10 @@ void MainWindow::launch(FrameWorker::Request req) {
     connect(worker, &FrameWorker::finished, thread, &QThread::quit, Qt::QueuedConnection);
     connect(thread, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread, &QThread::finished, this, [this, thread] {
-        if (thread_ == thread) thread_ = nullptr;
+        if (thread_ == thread) {
+            thread_ = nullptr;
+            videoPlayback_.reset();
+        }
         thread->deleteLater();
         if (closing_) { QWidget::close(); return; }
         if (restart_) {
@@ -629,11 +778,57 @@ void MainWindow::launch(FrameWorker::Request req) {
             launch(std::move(next_));
         } else {
             updateCameraButton();
+            updateVideoControls();
         }
     });
     statusBar()->showMessage("Loading model and opening source in worker...");
     updateCameraButton();
+    updateVideoControls();
     thread->start();
+}
+
+void MainWindow::setVideoPaused(bool paused) {
+    if (!videoPlayback_ || activeSource_ != FrameWorker::Source::Video || !thread_ ||
+        (stopFlag_ && stopFlag_->load())) return;
+    videoPlayback_->setPaused(paused);
+    updateVideoControls();
+}
+
+void MainWindow::seekVideo(qint64 positionMs) {
+    if (!videoPlayback_ || activeSource_ != FrameWorker::Source::Video || !thread_ ||
+        !videoSeekable_ || videoDurationMs_ <= 0 ||
+        (stopFlag_ && stopFlag_->load())) return;
+    const qint64 target = std::clamp<qint64>(positionMs, 0, videoDurationMs_ - 1);
+    displayVideoPosition(target); // Instant UI feedback; decoder reports its actual position later.
+    videoPlayback_->seek(target);
+}
+
+void MainWindow::displayVideoPosition(qint64 ms) {
+    videoPositionMs_ = std::max<qint64>(0, ms);
+    videoTimeLabel_->setText(formatVideoTime(videoPositionMs_));
+    if (!videoSlider_->isSliderDown()) {
+        const QSignalBlocker blocker(videoSlider_);
+        videoSlider_->setValue(videoSliderValue(videoPositionMs_, videoDurationMs_));
+    }
+}
+
+void MainWindow::updateVideoControls() {
+    if (!videoBar_) return;
+    const bool video = (thread_ && activeSource_ == FrameWorker::Source::Video) ||
+        (hasSource_ && lastSource_ == FrameWorker::Source::Video && !thread_);
+    videoBar_->setVisible(video);
+    const bool active = thread_ && activeSource_ == FrameWorker::Source::Video &&
+        videoPlayback_ && !restart_ && !closing_ && stopFlag_ && !stopFlag_->load();
+    const bool seek = active && videoSeekable_ && videoDurationMs_ > 0;
+    videoSlider_->setEnabled(seek);
+    for (auto* button : {videoStartButton_, videoEndButton_, skipBackButton_, skipForwardButton_})
+        button->setEnabled(seek);
+    videoStopButton_->setEnabled(active);
+    playPauseButton_->setEnabled(active || (video && !thread_));
+    const bool paused = !active || videoPlayback_->isPaused();
+    playPauseButton_->setIcon(style()->standardIcon(paused ? QStyle::SP_MediaPlay : QStyle::SP_MediaPause));
+    playPauseButton_->setToolTip(paused ? "Play video" : "Pause video");
+    playPauseButton_->setAccessibleName(playPauseButton_->toolTip());
 }
 
 void MainWindow::showMetrics(const FrameMetrics& m) {

@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <DetectCore.h>
+#include "VideoPlayback.h"
 
 // Live settings are shared with the GUI: atomic scalars + a short locked class set.
 // No Qt widgets or OpenCV capture objects are accessed across threads.
@@ -45,6 +46,8 @@ public:
         int threads = 4;
         int generation = 0;
         std::shared_ptr<LiveSettings> settings;
+        std::shared_ptr<VideoPlayback> playback; // Non-null for Video only.
+        std::int64_t initialVideoPositionMs = 0;
     };
     FrameWorker(Request request, std::shared_ptr<std::atomic_bool> stop,
                 std::shared_ptr<std::atomic_bool> pending);
@@ -53,6 +56,9 @@ public slots:
 signals:
     void frameReady(QImage image, FrameMetrics metrics, int generation);
     void classesReady(QStringList classes, int generation);
+    void videoOpened(qint64 durationMs, bool seekable, int generation);
+    void videoPosition(qint64 positionMs, int generation);
+    void playbackNotice(QString message, int generation);
     void error(QString message, int generation);
     void finished();
 private:
