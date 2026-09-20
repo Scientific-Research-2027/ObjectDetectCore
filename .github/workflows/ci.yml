@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     env:
       NCNN_REF: '20250503'
-      NCNN_PREFIX: ${{ runner.temp }}/ncnn-install
+      NCNN_PREFIX: ${{ github.workspace }}/.ci/ncnn-install
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
