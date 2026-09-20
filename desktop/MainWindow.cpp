@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include <QBoxLayout>
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -23,6 +24,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QToolButton>
 #include <QWidget>
 #include <algorithm>
 #include <utility>
@@ -88,6 +90,75 @@ QIcon toolbarIcon(bool camera, bool refresh) {
     p.end();
     return QIcon(pixels);
 }
+
+// The Windows/Qt native spin arrows can have a tiny (or incorrectly styled)
+// hit rectangle when QSS adds borders and padding to QAbstractSpinBox. Keep
+// the actual spin box as the single source of truth and use explicit, fixed-
+// width Qt buttons for dependable hit targets on Windows, Linux and HiDPI.
+// Everything is parent-owned; no per-click allocation or duplicate setting.
+QWidget* makeSteppingControl(QWidget* parent, QAbstractSpinBox* spin,
+                             const QString& settingName) {
+    auto* control = new QWidget(parent);
+    control->setObjectName("stepperContainer");
+    auto* row = new QHBoxLayout(control);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(0);
+
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setFrame(false);
+    spin->setObjectName("spinValue");
+    spin->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    row->addWidget(spin, 1);
+
+    auto* column = new QVBoxLayout;
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(1);
+    auto* up = new QToolButton(control);
+    auto* down = new QToolButton(control);
+    for (auto* button : {up, down}) {
+        button->setObjectName("spinStep");
+        button->setFixedWidth(28);
+        button->setMinimumHeight(16);
+        button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        button->setFocusPolicy(Qt::NoFocus); // Preserve keyboard input focus in the spin box.
+        button->setAutoRepeat(true);
+        button->setAutoRepeatDelay(400);
+        button->setAutoRepeatInterval(100);
+        column->addWidget(button);
+    }
+    up->setArrowType(Qt::UpArrow);
+    down->setArrowType(Qt::DownArrow);
+    up->setToolTip("Increase " + settingName);
+    down->setToolTip("Decrease " + settingName);
+    up->setAccessibleName("Increase " + settingName);
+    down->setAccessibleName("Decrease " + settingName);
+    row->addLayout(column);
+
+    // Use the spin box's stepUp/stepDown to retain its clamping, decimal
+    // precision, keyboard editing, and the existing valueChanged connections.
+    QObject::connect(up, &QToolButton::clicked, spin, [spin] { spin->stepUp(); });
+    QObject::connect(down, &QToolButton::clicked, spin, [spin] { spin->stepDown(); });
+
+    if (auto* floating = qobject_cast<QDoubleSpinBox*>(spin)) {
+        auto sync = [floating, up, down] {
+            up->setEnabled(floating->value() < floating->maximum());
+            down->setEnabled(floating->value() > floating->minimum());
+        };
+        QObject::connect(floating, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                         control, [sync](double) { sync(); });
+        sync();
+    } else if (auto* integer = qobject_cast<QSpinBox*>(spin)) {
+        auto sync = [integer, up, down] {
+            up->setEnabled(integer->value() < integer->maximum());
+            down->setEnabled(integer->value() > integer->minimum());
+        };
+        QObject::connect(integer, QOverload<int>::of(&QSpinBox::valueChanged),
+                         control, [sync](int) { sync(); });
+        sync();
+    }
+    return control;
+}
+
 }
 
 ImageView::ImageView(QWidget* parent) : QWidget(parent) {
@@ -135,6 +206,18 @@ MainWindow::MainWindow() {
         QComboBox, QDoubleSpinBox, QSpinBox { background: #253442; color: #f1f6fa;
                     border: 1px solid #35495a; border-radius: 5px; padding: 7px 9px;
                     min-height: 18px; selection-background-color: #256fda; }
+        QWidget#stepperContainer { background: #253442;
+                    border: 1px solid #35495a; border-radius: 5px; }
+        QDoubleSpinBox#spinValue, QSpinBox#spinValue { background: transparent;
+                    color: #f1f6fa; border: 0; border-radius: 0;
+                    padding: 6px 6px; min-height: 18px;
+                    selection-background-color: #256fda; }
+        QToolButton#spinStep { background: #304456; color: #f1f6fa;
+                    border: 0; border-left: 1px solid #40576b; border-radius: 0;
+                    padding: 0; margin: 0; }
+        QToolButton#spinStep:hover { background: #3b5872; }
+        QToolButton#spinStep:pressed { background: #1b6bd3; }
+        QToolButton#spinStep:disabled { background: #263542; color: #718397; }
         QComboBox::drop-down { border: 0; width: 22px; }
         QComboBox QAbstractItemView { background: #233241; color: white;
                     border: 1px solid #44607a; selection-background-color: #286dcd; }
@@ -247,7 +330,7 @@ MainWindow::MainWindow() {
         widget->setSingleStep(0.05);
         widget->setDecimals(2);
         widget->setValue(value);
-        form->addWidget(widget, row, 1);
+        form->addWidget(makeSteppingControl(settingsBox, widget, name), row, 1);
         return widget;
     };
     conf_ = makeFloat(0, "Confidence", 0.25);
@@ -258,7 +341,7 @@ MainWindow::MainWindow() {
     // values would be misleading until that backend limit is changed.
     maxDetections_->setRange(1, 300);
     maxDetections_->setValue(300);
-    form->addWidget(maxDetections_, 2, 1);
+    form->addWidget(makeSteppingControl(settingsBox, maxDetections_, "Max detections"), 2, 1);
     form->setColumnStretch(1, 1);
     right->addWidget(settingsBox);
     connect(conf_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
