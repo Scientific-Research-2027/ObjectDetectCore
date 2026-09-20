@@ -23,6 +23,31 @@ int main() {
     auto boxes=postprocessRaw(out,pre,info,0.25f,0.45f);
     CHECK(boxes.size()==1 && boxes[0].className=="first");
     CHECK(std::abs(boxes[0].bbox.x-135.f)<1.f && std::abs(boxes[0].bbox.y-95.f)<1.f);
+    // For ambiguous bird-shaped kites, the winning raw bird score cannot be
+    // corrected merely by changing NMS, confidence thresholds or class names.
+    ModelInfo coco; coco.names.resize(80);
+    for(int id=0;id<80;++id)coco.names[id]="class_"+std::to_string(id);
+    coco.names[14]="bird"; coco.names[33]="kite";
+    Tensor pair;pair.rows=84;pair.cols=2;
+    pair.values.assign(static_cast<size_t>(pair.rows)*pair.cols,0.f);
+    pair.values[0]=320; pair.values[1]=500; // cx
+    pair.values[2]=320; pair.values[3]=320; // cy
+    pair.values[4]=100; pair.values[5]=100; // width
+    pair.values[6]=100; pair.values[7]=100; // height
+    pair.values[(4+14)*2+0]=.90f;pair.values[(4+33)*2+0]=.82f;
+    pair.values[(4+14)*2+1]=.71f;pair.values[(4+33)*2+1]=.92f;
+    std::vector<BirdKiteEvidence> probe;
+    auto pairDetections=postprocessRaw(pair,pre,coco,.25f,.45f,&probe);
+    CHECK(pairDetections.size()==2 && probe.size()==2);
+    CHECK(pairDetections[0].classId==33 && pairDetections[1].classId==14);
+    CHECK(std::abs(probe[0].birdScore-.71f)<1e-6f &&
+          std::abs(probe[0].kiteScore-.92f)<1e-6f);
+    CHECK(std::abs(probe[1].birdScore-.90f)<1e-6f &&
+          std::abs(probe[1].kiteScore-.82f)<1e-6f);
+    CHECK(probe[0].candidateIndex==1 && probe[1].candidateIndex==0);
+    ModelInfo renamed=coco;renamed.names[14]="avian";
+    auto unrecognized=postprocessRaw(pair,pre,renamed,.25f,.45f,&probe);
+    CHECK(unrecognized.size()==2 && probe.empty());
     Tensor invalid=out;invalid.rows=5;
     bool rejected=false;
     try { (void)postprocessRaw(invalid,pre,info,0.25f,0.45f); }
@@ -50,6 +75,6 @@ int main() {
     try{ DetectCore core;(void)core.detect(blank); }
     catch(const std::logic_error&){noModel=true;}
     CHECK(noModel);
-    std::cout<<"PASS letterbox scales, float class-aware NMS, invalid thresholds/shape, unloaded model\n";
+    std::cout<<"PASS letterbox, float NMS, bird/kite raw-score audit, invalid input, unloaded model\n";
     return 0;
 }

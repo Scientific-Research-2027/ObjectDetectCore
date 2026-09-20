@@ -19,11 +19,12 @@ void DetectCore::loadModel(const std::filesystem::path& path,int threads){
 }
 bool DetectCore::isLoaded()const noexcept{return loaded_;}
 const ModelInfo& DetectCore::modelInfo()const {if(!loaded_)throw std::logic_error("Model chưa load");return model_;}
-DetectionResult DetectCore::detect(const cv::Mat& image,const Options& options){
+DetectionResult DetectCore::detect(const cv::Mat& image,const Options& options,
+                                   std::vector<BirdKiteEvidence>* evidence){
     if(!loaded_)throw std::logic_error("Model chưa load");
     auto t0=Clock::now(); auto pre=preprocess(image,model_.width,model_.height);auto t1=Clock::now();
     auto raw=engine_->infer(pre.rgb);auto t2=Clock::now();
-    auto boxes=postprocessRaw(raw,pre,model_,options.confidence,options.iou);auto t3=Clock::now();
+    auto boxes=postprocessRaw(raw,pre,model_,options.confidence,options.iou,evidence);auto t3=Clock::now();
     return {std::move(boxes),{ms(t0,t1),ms(t1,t2),ms(t2,t3)}};
 }
 }

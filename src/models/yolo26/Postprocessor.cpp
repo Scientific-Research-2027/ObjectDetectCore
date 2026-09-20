@@ -34,7 +34,8 @@ float intersectionOverUnion(const cv::Rect2f& a, const cv::Rect2f& b) noexcept {
 } // namespace
 
 std::vector<Detection> postprocessRaw(const Tensor& raw, const LetterboxResult& prep,
-                                      const ModelInfo& model, float conf, float iou) {
+                                      const ModelInfo& model, float conf, float iou,
+                                      std::vector<BirdKiteEvidence>* evidence) {
     const std::size_t nc = model.names.size();
     if (nc == 0 || nc > static_cast<std::size_t>(std::numeric_limits<int>::max() - 4) ||
         raw.rows != static_cast<int>(nc) + 4 || raw.cols < 1 || raw.cols > 300000 ||
@@ -47,6 +48,18 @@ std::vector<Detection> postprocessRaw(const Tensor& raw, const LetterboxResult& 
         !std::isfinite(prep.scaleX) || !std::isfinite(prep.scaleY) ||
         prep.originalWidth <= 0 || prep.originalHeight <= 0)
         throw std::logic_error("Letterbox khong hop le");
+
+    // A diagnostic probe, not an implicit bird->kite classification rule.
+    // Matching class names are checked at runtime, allowing custom model order.
+    int birdId = -1, kiteId = -1;
+    if (evidence) {
+        evidence->clear();
+        for (std::size_t c = 0; c < nc; ++c) {
+            if (model.names[c] == "bird") birdId = static_cast<int>(c);
+            if (model.names[c] == "kite") kiteId = static_cast<int>(c);
+        }
+        if (birdId >= 0 && kiteId >= 0) evidence->reserve(kMaxDetections);
+    }
 
     // NCNN RAW layout: [cx,cy,w,h, class0 ... classN] x candidate count.
     // Access contiguous row pointers instead of bounds-checked Tensor::at()
@@ -109,6 +122,14 @@ std::vector<Detection> postprocessRaw(const Tensor& raw, const LetterboxResult& 
         if (suppressed) continue;
         kept.push_back({candidate.classId, model.names[static_cast<std::size_t>(candidate.classId)],
                         candidate.score, candidate.box});
+        if (evidence && birdId >= 0 && kiteId >= 0 &&
+            (candidate.classId == birdId || candidate.classId == kiteId)) {
+            const float birdScore = data[(static_cast<std::size_t>(birdId) + 4) * count + candidate.index];
+            const float kiteScore = data[(static_cast<std::size_t>(kiteId) + 4) * count + candidate.index];
+            evidence->push_back({candidate.box, candidate.classId, candidate.index,
+                                 std::isfinite(birdScore) ? birdScore : -1.f,
+                                 std::isfinite(kiteScore) ? kiteScore : -1.f});
+        }
         if (kept.size() == kMaxDetections) break;
     }
     return kept;
