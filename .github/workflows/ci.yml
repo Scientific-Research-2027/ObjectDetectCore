@@ -1,0 +1,77 @@
+name: ObjectDetectCore CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: objectdetectcore-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Linux / C++20 / Qt6 / OpenCV / ncnn
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NCNN_REF: '20250503'
+      NCNN_PREFIX: ${{ runner.temp }}/ncnn-install
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config \
+            libopencv-dev qt6-base-dev \
+            python3-opencv python3-numpy python3-yaml
+
+      - name: Cache ncnn CPU-only SDK
+        id: ncnn-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NCNN_PREFIX }}
+          key: ${{ runner.os }}-ubuntu2404-ncnn-${{ env.NCNN_REF }}-cpu-v1
+
+      - name: Build and install ncnn CPU-only SDK
+        if: steps.ncnn-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${NCNN_REF}" https://github.com/Tencent/ncnn.git "${RUNNER_TEMP}/ncnn-src"
+          cmake -S "${RUNNER_TEMP}/ncnn-src" -B "${RUNNER_TEMP}/ncnn-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${NCNN_PREFIX}" \
+            -DNCNN_VULKAN=OFF \
+            -DNCNN_OPENMP=OFF \
+            -DNCNN_BUILD_TOOLS=OFF \
+            -DNCNN_BUILD_EXAMPLES=OFF \
+            -DNCNN_BUILD_TESTS=OFF \
+            -DNCNN_BUILD_BENCHMARK=OFF
+          cmake --build "${RUNNER_TEMP}/ncnn-build" --parallel 2
+          cmake --install "${RUNNER_TEMP}/ncnn-build"
+
+      - name: Configure ObjectDetectCore (including desktop)
+        run: |
+          cmake -S . -B build-ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${NCNN_PREFIX}" \
+            -DBUILD_DESKTOP=ON \
+            -DBUILD_TESTS=ON \
+            -DDETECTCORE_AUTO_DEPLOY_WINDOWS=OFF
+
+      - name: Compile core, CLI, tests and Qt desktop
+        run: cmake --build build-ci --parallel 2
+
+      - name: Run C++ regression tests
+        run: ctest --test-dir build-ci --output-on-failure
+
+      - name: Check Python script syntax
+        run: /usr/bin/python3 -m compileall -q tools tests
+
+      - name: Run Python unit tests (no training/model download)
+        run: /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
